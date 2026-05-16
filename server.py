@@ -3,9 +3,13 @@ from flask_cors import CORS
 import pdfplumber
 import tempfile
 import os
+import threading
 
 app = Flask(__name__)
 CORS(app)
+
+# Maximum pages to process at once to avoid timeout
+MAX_PAGES_PER_REQUEST = 10
 
 @app.route('/extract', methods=['POST'])
 def extract_text():
@@ -17,7 +21,7 @@ def extract_text():
 
         # Get page range from request
         start_page = int(request.form.get('start_page', 1))
-        end_page = int(request.form.get('end_page', 9999))
+        end_page   = int(request.form.get('end_page', 9999))
 
         # Save to a temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
@@ -26,11 +30,18 @@ def extract_text():
 
         # Extract text with page range
         text_parts = []
+        total = 0
+
         with pdfplumber.open(tmp_path) as pdf:
             total = len(pdf.pages)
+
             # Clamp to actual page count
-            actual_start = max(1, start_page) - 1        # convert to 0-based
-            actual_end   = min(total, end_page)           # inclusive
+            actual_start = max(1, start_page) - 1  # 0-based
+            actual_end   = min(total, end_page)
+
+            # Limit pages per request to avoid timeout
+            if (actual_end - actual_start) > MAX_PAGES_PER_REQUEST:
+                actual_end = actual_start + MAX_PAGES_PER_REQUEST
 
             for i in range(actual_start, actual_end):
                 page_text = pdf.pages[i].extract_text()
@@ -45,10 +56,17 @@ def extract_text():
         if not full_text.strip():
             return jsonify({'error': 'No text found in those pages. The PDF may be a scanned image.'}), 400
 
+        # Tell the app what pages were actually processed
+        processed_end = actual_start + MAX_PAGES_PER_REQUEST
+        has_more = processed_end < min(total, end_page)
+
         return jsonify({
             'text': full_text,
-            'pages': total,
-            'extracted_pages': actual_end - actual_start,
+            'total_pages': total,
+            'processed_start': actual_start + 1,
+            'processed_end': min(actual_end, total),
+            'has_more': has_more,
+            'next_start': actual_end + 1 if has_more else None,
             'characters': len(full_text)
         })
 
