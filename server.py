@@ -1,84 +1,101 @@
+"""
+PDF Audio Server — Backend
+Handles PDF text extraction only.
+Translation and TTS are handled by the frontend.
+"""
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pdfplumber
 import tempfile
 import os
-import threading
 
 app = Flask(__name__)
 CORS(app)
 
-# Maximum pages to process at once to avoid timeout
-MAX_PAGES_PER_REQUEST = 10
+MAX_PAGES = 10  # Max pages per request to avoid timeout
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ROUTES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'Server is running!'})
+
 
 @app.route('/extract', methods=['POST'])
-def extract_text():
+def extract():
+    """
+    Extract text from a PDF file.
+    Accepts: multipart/form-data with 'pdf' file, 'start_page', 'end_page'
+    Returns: JSON with extracted text and pagination info
+    """
+    if 'pdf' not in request.files:
+        return jsonify({'error': 'No PDF file received'}), 400
+
+    pdf_file   = request.files['pdf']
+    start_page = int(request.form.get('start_page', 1))
+    end_page   = int(request.form.get('end_page', 9999))
+
+    # Save to temp file
+    tmp_path = None
     try:
-        if 'pdf' not in request.files:
-            return jsonify({'error': 'No PDF file received'}), 400
-
-        pdf_file = request.files['pdf']
-
-        # Get page range from request
-        start_page = int(request.form.get('start_page', 1))
-        end_page   = int(request.form.get('end_page', 9999))
-
-        # Save to a temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
             pdf_file.save(tmp.name)
             tmp_path = tmp.name
 
-        # Extract text with page range
         text_parts = []
-        total = 0
+        total_pages = 0
 
         with pdfplumber.open(tmp_path) as pdf:
-            total = len(pdf.pages)
-
-            # Clamp to actual page count
-            actual_start = max(1, start_page) - 1  # 0-based
-            actual_end   = min(total, end_page)
+            total_pages  = len(pdf.pages)
+            actual_start = max(0, start_page - 1)           # 0-based
+            actual_end   = min(total_pages, end_page)
 
             # Limit pages per request to avoid timeout
-            if (actual_end - actual_start) > MAX_PAGES_PER_REQUEST:
-                actual_end = actual_start + MAX_PAGES_PER_REQUEST
+            if (actual_end - actual_start) > MAX_PAGES:
+                actual_end = actual_start + MAX_PAGES
 
             for i in range(actual_start, actual_end):
                 page_text = pdf.pages[i].extract_text()
                 if page_text and page_text.strip():
                     text_parts.append(page_text.strip())
 
-        # Clean up temp file
-        os.unlink(tmp_path)
-
         full_text = '\n\n'.join(text_parts)
 
         if not full_text.strip():
-            return jsonify({'error': 'No text found in those pages. The PDF may be a scanned image.'}), 400
+            return jsonify({'error': 'No text found. The PDF may be a scanned image.'}), 400
 
-        # Tell the app what pages were actually processed
-        processed_end = actual_start + MAX_PAGES_PER_REQUEST
-        has_more = processed_end < min(total, end_page)
+        has_more    = actual_end < min(total_pages, end_page)
+        next_start  = actual_end + 1 if has_more else None
 
         return jsonify({
-            'text': full_text,
-            'total_pages': total,
+            'text':            full_text,
+            'total_pages':     total_pages,
             'processed_start': actual_start + 1,
-            'processed_end': min(actual_end, total),
-            'has_more': has_more,
-            'next_start': actual_end + 1 if has_more else None,
-            'characters': len(full_text)
+            'processed_end':   actual_end,
+            'has_more':        has_more,
+            'next_start':      next_start,
+            'characters':      len(full_text),
         })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'Server is running!'})
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MAIN
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if __name__ == '__main__':
-    print("✅ PDF Server is running!")
-    print("📡 Your phone can now send PDFs to this server")
-    print("🛑 Press Ctrl+C to stop the server")
+    print("✅ PDF Audio Server running!")
+    print("📡 Endpoints: /health  /extract")
+    print("🛑 Press Ctrl+C to stop")
     app.run(host='0.0.0.0', port=5000, debug=False)
